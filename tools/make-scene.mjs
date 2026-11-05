@@ -1,6 +1,7 @@
 // Шапка, приветствие и карточка-портрет: node tools/make-scene.mjs
 // Слои неба и замка готовит tools/make-backdrop.py (assets/build/), портрет — tools/make-avatar.py.
 import { pixelText, ADVANCE } from "./pixel-font.mjs";
+import { existsSync } from "node:fs";
 import { asset, pimg, pngSize, frame, hairGradient, writeSvg, C, FONT_UI } from "./svg-kit.mjs";
 
 const TILE = 576; // ширина бесшовного куска облаков
@@ -17,8 +18,70 @@ const DRIFT_CSS = `
 `;
 
 // ---------- 1. шапка: мансарда и закатное небо ----------
-{
+// Зверушки: кадры из tools/make-critters.py, листаются CSS-анимацией по opacity
+const critterFrames = (name) => {
+  const frames = [];
+  for (let i = 0; existsSync(b(`critters/${name}-${i}.png`)); i++) frames.push(b(`critters/${name}-${i}.png`));
+  return frames;
+};
+/** Покадровая анимация: n кадров стопкой, каждый виден свою 1/n периода */
+function flipbook(name, x, y, period, flip = false) {
+  const frames = critterFrames(name);
+  const [w, h] = pngSize(frames[0]);
+  const n = frames.length;
+  const t = flip ? ` transform="translate(${2 * x + w} 0) scale(-1 1)"` : "";
+  return {
+    w, h,
+    svg:
+      `<g${t}>` +
+      frames
+        .map((f, i) => pimg(f, x, y, w, h, `class="fb${n}" style="animation-duration:${period}s;animation-delay:${((i * period) / n).toFixed(3)}s"`))
+        .join("") +
+      `</g>`,
+    css: `.fb${n}{opacity:0;animation:fb${n} steps(1) infinite}@keyframes fb${n}{0%{opacity:1}${(100 / n).toFixed(3)}%,100%{opacity:0}}`,
+  };
+}
+
+const pct = (t, T) => +((t / T) * 100).toFixed(3);
+/** keyframes, где элемент виден только в окна [a, b) секунд периода T */
+function windowKeyframes(name, windows, T) {
+  const marks = new Map([[0, 0], [100, 0]]);
+  for (const [a, b2] of windows) {
+    marks.set(pct(a, T), 1);
+    if (!marks.has(pct(b2, T)) || pct(b2, T) === 100) marks.set(pct(b2, T), pct(b2, T) === 100 ? marks.get(100) : 0);
+  }
+  if (windows.some(([a]) => a === 0)) marks.set(0, 1);
+  const body = [...marks.entries()].sort((x, y) => x[0] - y[0]).map(([k, v]) => `${k}%{opacity:${v}}`).join("");
+  return `@keyframes ${name}{${body}}`;
+}
+/** Кадры по сценарию: seq = [[кадр, секунд], ...], крутится по кругу */
+function seqbook(uid, name, seq, x = 0, y = 0) {
+  const frames = critterFrames(name);
+  const [w, h] = pngSize(frames[0]);
+  const T = seq.reduce((a, [, d]) => a + d, 0);
+  const wins = new Map();
+  let t = 0;
+  for (const [i, d] of seq) {
+    if (!wins.has(i)) wins.set(i, []);
+    wins.get(i).push([t, t + d]);
+    t += d;
+  }
+  let css = "";
+  const svg = [...wins.entries()]
+    .map(([i, ws]) => {
+      css += `.${uid}${i}{opacity:0;animation:${uid}${i} ${T.toFixed(3)}s steps(1,end) infinite}${windowKeyframes(`${uid}${i}`, ws, T)}
+`;
+      return pimg(frames[i], x, y, w, h, `class="${uid}${i}"`);
+    })
+    .join("");
+  return { w, h, T, svg, css };
+}
+/** Обычный цикл всех кадров с равной длительностью */
+const loop = (uid, name, frameSec) => seqbook(uid, name, critterFrames(name).map((_, i) => [i, frameSec]));
+
+function makeBanner(file, extras = []) {
   const W = 960, H = 220;
+  const css = new Set();
   const out = [
     pimg(b("banner-sky.png"), 0, 0, W, H),
     pimg(b("banner-far.png"), 0, 0, W + TILE, H, `class="drift far"`),
@@ -40,6 +103,35 @@ const DRIFT_CSS = `
       `<g fill="#3b2244" class="fly" style="animation-delay:-${delay}s;animation-duration:${dur}s"><g transform="translate(0 ${y})">${sprite(birdUp, s, "f1")}${sprite(birdDown, s, "f2")}</g></g>`,
     );
   });
+  // красный дракон летит справа налево (из-за мансарды): машет крыльями, потом парит
+  if (extras.includes("dragon-glide")) {
+    const F = 0.13; // секунд на кадр взмаха
+    const flap = (k) => Array.from({ length: 6 * k }, (_, i) => [i % 6, F]);
+    const GLIDE = 4; // кадр с раскрытыми крыльями
+    const seq = [...flap(2), [GLIDE, 2.4, true], ...flap(1), [GLIDE, 1.8, true], ...flap(3), [GLIDE, 2.6, true]];
+    const d = seqbook("dg", "dragon-red", seq);
+    css.add(d.css);
+    // высота: на взмахах набирает, в парении плавно снижается — в такт сценарию
+    let t = 0, yy = 0;
+    const alt = [`0%{transform:translateY(0)}`];
+    for (const [, dur, glide] of seq) {
+      t += dur;
+      if (glide) yy += 14;
+      else yy -= 14 / 6 / 2.2;
+      alt.push(`${pct(t, d.T)}%{transform:translateY(${yy.toFixed(1)}px)}`);
+    }
+    const drift = yy; // за цикл высота должна вернуться — растягиваем возврат на весь цикл
+    const altFixed = alt.map((k) => k.replace(/translateY\(([-\d.]+)px\)/, (_, v) => {
+      const p = parseFloat(k);
+      return `translateY(${(parseFloat(v) - (drift * p) / 100).toFixed(1)}px)`;
+    }));
+    css.add(`.dalt{animation:dalt ${d.T.toFixed(3)}s linear infinite}@keyframes dalt{${altFixed.join("")}}`);
+    const FLY = 14, PAUSE = 14, TT = FLY + PAUSE;
+    css.add(`.dpath{animation:dpath ${TT}s linear infinite;transform:translate(${W + 20}px,30px)}
+@keyframes dpath{0%{transform:translate(${W + 20}px,30px)}${pct(FLY, TT)}%{transform:translate(${-d.w - 20}px,44px)}100%{transform:translate(${-d.w - 20}px,44px)}}`);
+    // кадры смотрят вправо — отражаем
+    out.push(`<g class="dpath"><g class="dalt"><g transform="translate(${d.w} 0) scale(-1 1)">${d.svg}</g></g></g>`);
+  }
   out.push(pimg(b("banner-castle.png"), 0, 0, W, H));
   // тёплый свет из витражей «дышит»
   out.push(`<ellipse cx="753" cy="130" rx="190" ry="110" fill="url(#lamp)" class="lamp"/>`);
@@ -47,14 +139,60 @@ const DRIFT_CSS = `
   [[640, 120], [700, 60], [820, 52], [880, 118], [930, 90], [610, 170], [905, 165]].forEach(([x, y], i) =>
     out.push(`<rect x="${x}" y="${y}" width="3" height="3" fill="#ffe7a8" class="tw" style="animation-delay:${(i * 0.55).toFixed(2)}s"/>`),
   );
-  writeSvg("banner.svg", W, H, "Пиксельная мансарда замка на фоне закатного неба", out.join("\n"), {
+  // котик гуляет по черепице: идёт вправо, сидит, выгибает спинку, сидит, идёт обратно, сидит
+  if (extras.includes("cat-walk")) {
+    const GY = 196; // где лапы
+    const X0 = 70, X1 = 430;
+    const T = 36;
+    const plan = [ // [состояние, направление, начало, конец]
+      ["walk", 1, 0, 10], ["idle", 1, 10, 15], ["arch", 1, 15, 17.4], ["idle", 1, 17.4, 21],
+      ["walk", -1, 21, 31], ["idle", -1, 31, 36],
+    ];
+    const books = { walk: loop("cw", "cat-walk", 0.13), idle: loop("ci", "cat-idle", 0.2), arch: loop("ca", "cat-arch", 0.22) };
+    for (const bk of Object.values(books)) css.add(bk.css);
+    const { w, h } = books.idle;
+    const C = 40; // центр тела в кадре — вокруг него разворачиваемся
+    const groups = [];
+    for (const dir of [1, -1]) {
+      for (const st of ["walk", "idle", "arch"]) {
+        const wins = plan.filter(([s2, d2]) => s2 === st && d2 === dir).map(([, , a, b2]) => [a, b2]);
+        if (!wins.length) continue;
+        const uid = `cs${st}${dir > 0 ? "r" : "l"}`;
+        css.add(`.${uid}{opacity:0;animation:${uid} ${T}s steps(1,end) infinite}${windowKeyframes(uid, wins, T)}`);
+        const flip = dir < 0 ? ` transform="translate(${2 * C} 0) scale(-1 1)"` : "";
+        groups.push(`<g class="${uid}"><g${flip}>${books[st].svg}</g></g>`);
+      }
+    }
+    css.add(`.cpath{animation:cpath ${T}s linear infinite}
+@keyframes cpath{0%{transform:translate(${X0}px,${GY - h}px)}${pct(10, T)}%,${pct(21, T)}%{transform:translate(${X1}px,${GY - h}px)}${pct(31, T)}%,100%{transform:translate(${X0}px,${GY - h}px)}}`);
+    out.push(`<g class="cpath">${groups.join("")}</g>`);
+  }
+  if (extras.includes("rabbit")) {
+    const fb = flipbook("rabbit", 190, 0, 1.6);
+    out.push(fb.svg.replace(/y="0"/g, `y="${153 - fb.h}"`));
+    css.add(fb.css);
+  }
+  writeSvg(file, W, H, "Пиксельная мансарда замка на фоне закатного неба", out.join("\n"), {
     css: `${DRIFT_CSS}
 .fly{animation:fly linear infinite}
 @keyframes fly{from{transform:translateX(${W + 20}px)}to{transform:translateX(-40px)}}
 .f1{animation:f1 .5s steps(1) infinite}.f2{animation:f2 .5s steps(1) infinite}
-@keyframes f1{50%{opacity:0}}@keyframes f2{0%{opacity:0}50%{opacity:1}}`,
+@keyframes f1{50%{opacity:0}}@keyframes f2{0%{opacity:0}50%{opacity:1}}
+${[...css].join("\n")}`,
     defs: `<radialGradient id="lamp"><stop offset="0" stop-color="#ffcf7a" stop-opacity=".3"/><stop offset="1" stop-color="#ffcf7a" stop-opacity="0"/></radialGradient>`,
   });
+}
+
+// основная шапка — состав зверей задаётся здесь; варианты для выбора — в assets/variants/
+const BANNER_EXTRAS = ["cat-walk", "dragon-glide"];
+makeBanner("banner.svg", BANNER_EXTRAS);
+if (process.argv.includes("--variants")) {
+  for (const [name, ex] of Object.entries({
+    "cat-walk": ["cat-walk"],
+    "dragon-glide": ["dragon-glide"],
+    "cat-walk-dragon-glide": ["cat-walk", "dragon-glide"],
+  }))
+    makeBanner(`variants/banner-${name}.svg`, ex);
 }
 
 // ---------- 2. приветствие, которое печатается ----------

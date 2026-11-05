@@ -14,8 +14,11 @@ export const pngSize = (file) => {
 };
 
 /** <image> с чёткими пикселями */
-export const pimg = (file, x, y, w, h, attrs = "") =>
-  `<image x="${x}" y="${y}" width="${w}" height="${h}" preserveAspectRatio="none" style="image-rendering:pixelated"${attrs ? " " + attrs : ""} href="${pngUri(file)}"/>`;
+export const pimg = (file, x, y, w, h, attrs = "") => {
+  const px = "image-rendering:pixelated";
+  const a = attrs.includes('style="') ? " " + attrs.replace('style="', `style="${px};`) : ` style="${px}"${attrs ? " " + attrs : ""}`;
+  return `<image x="${x}" y="${y}" width="${w}" height="${h}" preserveAspectRatio="none"${a} href="${pngUri(file)}"/>`;
+};
 
 // Палитра профиля: бирюза → салатовый (волосы), розовый (пряди), закат
 export const C = {

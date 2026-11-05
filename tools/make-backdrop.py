@@ -38,21 +38,25 @@ sky = [Image.open(sky_dir / f"{i}.png").convert("RGBA") for i in range(1, 5)]
 TILE = sky[0].width  # 576, набор бесшовный по горизонтали
 
 
-def band(layer, width, height, dx=0, dy=0):
-    """Лента из повторов слоя: ширина width, сдвиг узора dx, вертикальный сдвиг dy."""
+def band(layer, width, height, dx=0, dy=0, mirror=False):
+    """Лента из повторов слоя: ширина width, сдвиг узора dx, вертикальный сдвиг dy.
+    mirror=True — каждый второй повтор отражён: так стыкуется даже не бесшовный слой."""
     out = Image.new("RGBA", (width, height))
-    for x in range(-dx, width, TILE):
+    flipped = layer.transpose(Image.FLIP_LEFT_RIGHT)
+    for k, x in enumerate(range(-dx, width, TILE)):
+        tile = flipped if mirror and k % 2 else layer
         if x >= 0:
-            out.alpha_composite(layer, (x, dy))
+            out.alpha_composite(tile, (x, dy))
         else:
-            out.alpha_composite(layer.crop((-x, 0, TILE, layer.height)), (0, dy))
+            out.alpha_composite(tile.crop((-x, 0, TILE, tile.height)), (0, dy))
     return out
 
 
 # шапка ниже неба (220 < 324): берём нижнюю, самую закатную часть
 SKY_DY = BH - sky[0].height
-base = band(sky[0], BW, BH, 120, SKY_DY)
-base.alpha_composite(band(sky[1], BW, BH, 120, SKY_DY))
+# фон Clouds 7 по краям не бесшовный — кладём зеркально (он неподвижен, повтор не заметен)
+base = band(sky[0], BW, BH, 120, SKY_DY, mirror=True)
+base.alpha_composite(band(sky[1], BW, BH, 120, SKY_DY, mirror=True))
 save(base, "banner-sky.png")
 save(band(sky[2], BW + TILE, BH, 120, SKY_DY), "banner-far.png")
 save(band(sky[3], BW + TILE, BH, 300, SKY_DY), "banner-near.png")
